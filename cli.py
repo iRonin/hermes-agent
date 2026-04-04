@@ -1184,6 +1184,16 @@ class HermesCLI:
         # busy_input_mode: "interrupt" (Enter interrupts current run) or "queue" (Enter queues for next turn)
         _bim = CLI_CONFIG["display"].get("busy_input_mode", "interrupt")
         self.busy_input_mode = "queue" if str(_bim).strip().lower() == "queue" else "interrupt"
+        # Dispatch mode for each queue:
+        #   "one_by_one"  — each queued message triggers its own agent turn (default)
+        #   "all_at_once" — after a turn, all queued messages are joined and sent as one turn
+        _sdm = CLI_CONFIG["display"].get("steering_dispatch", "one_by_one")
+        self.steering_dispatch = "all_at_once" if str(_sdm).strip().lower() == "all_at_once" else "one_by_one"
+        _fdm = CLI_CONFIG["display"].get("followup_dispatch", "one_by_one")
+        self.followup_dispatch = "all_at_once" if str(_fdm).strip().lower() == "all_at_once" else "one_by_one"
+        self._show_full_user_message: bool = bool(
+            CLI_CONFIG["display"].get("show_full_user_message", False)
+        )
 
         self.verbose = verbose if verbose is not None else (self.tool_progress_mode == "verbose")
         
@@ -7096,9 +7106,10 @@ class HermesCLI:
                         # Tag and track in the 🎯 steering queue
                         import uuid as _uuid_mod
                         _stag = _uuid_mod.uuid4().hex
-                        cli_ref._pending_input.put({"_steering_tag": _stag, "payload": payload})
                         _steer_text = text if text else f"[{len(images)} image{'s' if len(images) != 1 else ''} attached]"
                         cli_ref._steering_queue.append({"id": _stag, "payload": payload, "text": _steer_text})
+                        if cli_ref.steering_dispatch == "one_by_one":
+                            cli_ref._pending_input.put({"_steering_tag": _stag, "payload": payload})
                         _sdepth = len(cli_ref._steering_queue)
                         _spreview = _steer_text[:60] + ("..." if len(_steer_text) > 60 else "")
                         _cprint(f"  {_DIM}🎯 Steering queued #{_sdepth}: \"{_spreview}\"{_RST}")
@@ -7120,8 +7131,54 @@ class HermesCLI:
         
         @kb.add('escape', 'enter')
         def handle_alt_enter(event):
-            """Alt+Enter inserts a newline for multi-line input."""
-            event.current_buffer.insert_text('\n')
+            """Alt+Enter: queue message as follow-up (sent after current response).
+
+            When agent is idle, behaves like Enter (sends immediately to _pending_input).
+            When agent is running, queues without interrupting — sent as the next turn.
+            _followup_queue mirrors what's pending for status display.
+            Use Ctrl+J / Ctrl+Enter for inserting a newline in multi-line input.
+            """
+            if cli_ref._sudo_state or cli_ref._secret_state or cli_ref._clarify_state or cli_ref._approval_state:
+                return
+
+            text = event.app.current_buffer.text.strip()
+            has_images = bool(cli_ref._attached_images)
+            if not text and not has_images:
+                return
+
+            images = list(cli_ref._attached_images)
+            cli_ref._attached_images.clear()
+            payload = (text, images) if images else text
+
+            import uuid as _uuid_mod
+            tag = _uuid_mod.uuid4().hex
+            cli_ref._followup_queue.append({"id": tag, "payload": payload, "text": text})
+            if cli_ref.followup_dispatch == "one_by_one":
+                # Wrap with tag so process_loop can identify and cancel by ID, not text
+                cli_ref._pending_input.put({"_followup_tag": tag, "payload": payload})
+            event.app.current_buffer.reset(append_to_history=True)
+
+            queue_depth = len(cli_ref._followup_queue)
+            preview = text[:60] + ("..." if len(text) > 60 else "")
+            if cli_ref._agent_running:
+                _cprint(f"  {_DIM}📬 Queued follow-up #{queue_depth}: \"{preview}\"{_RST}")
+            else:
+                _cprint(f"  {_DIM}📬 Queued: \"{preview}\"{_RST}")
+            event.app.invalidate()
+
+        @kb.add('escape', 'escape')
+        def handle_double_escape(event):
+            """Double ESC: clear the input buffer.
+
+            Press ESC twice quickly to discard the current draft.
+            Single ESC is the prefix for Alt key sequences (escape, enter etc.)
+            so the double-press avoids conflicting with those.
+            """
+            buf = event.app.current_buffer
+            if buf.text or cli_ref._attached_images:
+                buf.reset()
+                cli_ref._attached_images.clear()
+                event.app.invalidate()
 
         @kb.add('c-j')
         def handle_ctrl_enter(event):
@@ -8305,6 +8362,42 @@ class HermesCLI:
                     finally:
                         self._agent_running = False
                         self._spinner_text = ""
+
+                        # all_at_once dispatch: drain queues and combine into one message
+                        for _qname, _queue, _tag_key, _mode, _icon in [
+                            ("steering",  self._steering_queue,  "_steering_tag",  self.steering_dispatch,  "🎯"),
+                            ("followup",  self._followup_queue,  "_followup_tag",  self.followup_dispatch,  "📬"),
+                        ]:
+                            if _mode == "all_at_once" and _queue:
+                                # Filter out cancelled items, then drain the whole queue
+                                _items = [
+                                    it for it in _queue
+                                    if it["id"] not in (
+                                        self._cancelled_steerings if _qname == "steering"
+                                        else self._cancelled_followups
+                                    )
+                                ]
+                                _queue.clear()
+                                if _qname == "steering":
+                                    self._cancelled_steerings.clear()
+                                else:
+                                    self._cancelled_followups.clear()
+                                if _items:
+                                    # Join text with separator; images from last item only
+                                    _texts = [it["text"] for it in _items]
+                                    _combined_text = "\n---\n".join(_texts)
+                                    # Carry images from all items
+                                    _all_images = []
+                                    for it in _items:
+                                        p = it["payload"]
+                                        if isinstance(p, tuple):
+                                            _all_images.extend(p[1])
+                                    _combined = (_combined_text, _all_images) if _all_images else _combined_text
+                                    _cprint(
+                                        f"  {_DIM}{_icon} Dispatching {len(_items)} queued message"
+                                        f"{'s' if len(_items) != 1 else ''} as one turn{_RST}"
+                                    )
+                                    self._pending_input.put(_combined)
 
                         app.invalidate()  # Refresh status line
 
