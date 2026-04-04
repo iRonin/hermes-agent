@@ -1422,6 +1422,77 @@ class HermesCLI:
         self._background_tasks: Dict[str, threading.Thread] = {}
         self._background_task_counter = 0
 
+    # ── Cross-session queue persistence ────────────────────────────────────────
+
+    def _resolve_queues_save_path(self):
+        """Return per-session JSON path for queue persistence, or None."""
+        if self.session_id and getattr(self, "_session_db", None):
+            from hermes_constants import get_hermes_home
+            return get_hermes_home() / "sessions" / self.session_id / "queues.json"
+        return None
+
+    def _load_queues_from_disk(self) -> None:
+        """Restore stash and queues from queues.json (if it exists)."""
+        try:
+            path = self._resolve_queues_save_path()
+            if path and path.is_file():
+                import json as _json
+                data = _json.loads(path.read_text(encoding="utf-8"))
+                self._followup_queue = data.get("followup_queue", [])
+                self._cancelled_followups = set(data.get("cancelled_followups", []))
+                self._steering_queue = data.get("steering_queue", [])
+                self._cancelled_steerings = set(data.get("cancelled_steerings", []))
+                self._stash_list = data.get("stash_list", [])
+                for item in self._stash_list:
+                    item["images"] = [Path(p) for p in item.get("images", [])]
+        except Exception:
+            pass
+
+    def _save_queues_to_disk(self) -> None:
+        """Serialise stash and queues to per-session queues.json (best-effort)."""
+        try:
+            path = self._resolve_queues_save_path()
+            if not path:
+                return
+            path.parent.mkdir(parents=True, exist_ok=True)
+            import json as _json
+
+            def _ser(payload):
+                if isinstance(payload, (tuple, list)) and len(payload) >= 1:
+                    imgs = payload[1] if len(payload) > 1 else []
+                    return (payload[0], [str(i) for i in imgs]) if imgs else payload[0]
+                return payload
+
+            data = {
+                "followup_queue": [
+                    {**it, "payload": _ser(it.get("payload"))} for it in self._followup_queue
+                ],
+                "cancelled_followups": list(self._cancelled_followups),
+                "steering_queue": [
+                    {**it, "payload": _ser(it.get("payload"))} for it in self._steering_queue
+                ],
+                "cancelled_steerings": list(self._cancelled_steerings),
+                "stash_list": [
+                    {**it, "images": [str(p) for p in it.get("images", [])]} for it in self._stash_list
+                ],
+            }
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(_json.dumps(data), encoding="utf-8")
+            tmp.replace(path)
+        except Exception:
+            pass
+
+    def _clear_queues_from_disk(self) -> None:
+        """Remove queues.json on clean exit."""
+        try:
+            path = self._resolve_queues_save_path()
+            if path and path.is_file():
+                path.unlink()
+        except Exception:
+            pass
+
+    # ───────────────────────────────────────────────────────────────────────────
+
     def _invalidate(self, min_interval: float = 0.25) -> None:
         """Throttled UI repaint — prevents terminal blinking on slow/SSH connections."""
         import time as _time
@@ -3006,7 +3077,7 @@ class HermesCLI:
             ]),
             ("Drafting", [
                 ("Ctrl+G",          "Open input in external editor ($VISUAL / VS Code)"),
-                ("Ctrl+S",          "Stash input (multi-item); Ctrl+S on empty = pop/browse; ↑↓ Enter D in panel"),
+                ("Ctrl+S",          "Stash input (pop with Ctrl+S; auto-restores after response if buffer empty)"),
                 ("Ctrl+P",          "Peek paste / preview input / full history pager (empty input)"),
                 ("Ctrl+V",          "Paste from clipboard (image-aware)"),
                 ("ESC ESC",         "Clear input buffer and attached images"),
@@ -7642,68 +7713,18 @@ class HermesCLI:
                     "preview": preview or f"[{len(images)} image{'s' if len(images) != 1 else ''}]",
                 })
                 buf.reset()
-                _cprint(f"  {_DIM}📌 Stashed #{len(cli_ref._stash_list)} (Ctrl+S to browse/pop){_RST}")
-            elif cli_ref._stash_list:
-                if len(cli_ref._stash_list) == 1:
-                    # Single item — pop immediately
-                    item = cli_ref._stash_list.pop(0)
-                    buf.text = item["text"]
-                    buf.cursor_position = len(item["text"])
-                    if item["images"]:
-                        cli_ref._attached_images.extend(item["images"])
-                    _cprint(f"  {_DIM}📌 Stash popped{_RST}")
-                else:
-                    # Multiple items — open browser
-                    cli_ref._stash_panel_open = True
-                    cli_ref._stash_panel_cursor = 0
-            else:
-                _cprint(f"  {_DIM}📌 Stash is empty{_RST}")
-            event.app.invalidate()
-
-        # Stash panel navigation keybindings (only active when panel is open)
-        _stash_panel_active = Condition(lambda: cli_ref._stash_panel_open and bool(cli_ref._stash_list))
-
-        @kb.add('up', filter=_stash_panel_active, eager=True)
-        def stash_panel_up(event):
-            cli_ref._stash_panel_cursor = max(0, cli_ref._stash_panel_cursor - 1)
-            event.app.invalidate()
-
-        @kb.add('down', filter=_stash_panel_active, eager=True)
-        def stash_panel_down(event):
-            cli_ref._stash_panel_cursor = min(len(cli_ref._stash_list) - 1, cli_ref._stash_panel_cursor + 1)
-            event.app.invalidate()
-
-        @kb.add('enter', filter=_stash_panel_active, eager=True)
-        def stash_panel_enter(event):
-            if cli_ref._stash_list:
-                item = cli_ref._stash_list.pop(cli_ref._stash_panel_cursor)
-                buf = event.app.current_buffer
-                buf.text = item["text"]
-                buf.cursor_position = len(item["text"])
-                if item["images"]:
-                    cli_ref._attached_images.extend(item["images"])
-                cli_ref._stash_panel_open = False
-                cli_ref._stash_panel_cursor = min(
-                    cli_ref._stash_panel_cursor, max(0, len(cli_ref._stash_list) - 1)
-                )
-                _cprint(f"  {_DIM}📌 Stash item restored{_RST}")
-            event.app.invalidate()
-
-        @kb.add('d', filter=_stash_panel_active)
-        def stash_panel_delete(event):
-            if cli_ref._stash_list:
-                cli_ref._stash_list.pop(cli_ref._stash_panel_cursor)
-                cli_ref._stash_panel_cursor = min(
-                    cli_ref._stash_panel_cursor, max(0, len(cli_ref._stash_list) - 1)
-                )
-                if not cli_ref._stash_list:
-                    cli_ref._stash_panel_open = False
-            event.app.invalidate()
-
-        @kb.add('escape', filter=_stash_panel_active)
-        def stash_panel_esc(event):
-            cli_ref._stash_panel_open = False
-            event.app.invalidate()
+                _cprint(f"  {_DIM}📌 Input stashed (Ctrl+S to pop; auto-restores if buffer empty after response){_RST}")
+                event.app.invalidate()
+            elif cli_ref._stashed_input:
+                # --- Pop stash into input ---
+                stashed_text, stashed_images = cli_ref._stashed_input
+                cli_ref._stashed_input = None
+                if stashed_images:
+                    cli_ref._attached_images.extend(stashed_images)
+                buf.text = stashed_text
+                buf.cursor_position = len(stashed_text)
+                _cprint(f"  {_DIM}📌 Stash restored{_RST}")
+                event.app.invalidate()
 
         @kb.add('c-p')
         def handle_peek_or_history(event):
@@ -8738,65 +8759,22 @@ class HermesCLI:
                         # but only if the buffer is empty — never clobber text
                         # the user started typing while the agent was responding.
                         if self._stashed_input:
-                            if self.stash_auto_restore:
-                                stashed_text, stashed_images = self._stashed_input
-                                try:
-                                    buf = app.layout.current_buffer
-                                    if buf.text.strip():
-                                        # Buffer has content — leave stash intact,
-                                        # user can pop it manually with Ctrl+S.
-                                        _cprint(f"  {_DIM}📌 Stash kept (buffer not empty — Ctrl+S to pop){_RST}")
-                                    else:
-                                        self._stashed_input = None
-                                        if stashed_images:
-                                            self._attached_images.extend(stashed_images)
-                                        buf.text = stashed_text
-                                        buf.cursor_position = len(stashed_text)
-                                        _cprint(f"  {_DIM}📌 Stashed input restored{_RST}")
-                                except Exception:
-                                    pass
-                            else:
-                                _cprint(f"  {_DIM}📌 Stash ready — Ctrl+S to pop{_RST}")
-
-                        # Post-turn queue dispatch.
-                        # Steering always takes priority — follow-up only runs when steering is empty.
-                        def _dispatch_queue(_queue, _cancelled, _mode, _icon, _tag_key):
-                            """Drain one turn's worth from a queue. Returns True if anything dispatched."""
-                            _active = [it for it in _queue if it["id"] not in _cancelled]
-                            if not _active:
-                                _queue.clear()
-                                _cancelled.clear()
-                                return False
-                            if _mode == "all_at_once":
-                                _queue.clear()
-                                _cancelled.clear()
-                                _texts = [it["text"] for it in _active]
-                                _imgs = [img for it in _active
-                                         if isinstance(it["payload"], tuple)
-                                         for img in it["payload"][1]]
-                                _combined = ("\n---\n".join(_texts), _imgs) if _imgs else "\n---\n".join(_texts)
-                                _cprint(f"  {_DIM}{_icon} Dispatching {len(_active)} queued"
-                                        f" message{'s' if len(_active) != 1 else ''} as one turn{_RST}")
-                                self._pending_input.put(_combined)
-                            else:
-                                # one_by_one: pop first, leave the rest for subsequent turns
-                                first = _active[0]
-                                _queue.clear()
-                                _cancelled.discard(first["id"])
-                                for remaining in _active[1:]:
-                                    _queue.append(remaining)
-                                self._pending_input.put({_tag_key: first["id"], "payload": first["payload"]})
-                                if len(_active) > 1:
-                                    _cprint(f"  {_DIM}{_icon} Dispatched 1, {len(_active)-1} still queued{_RST}")
-                            return True
-
-                        _steered = _dispatch_queue(
-                            self._steering_queue, self._cancelled_steerings,
-                            self.steering_dispatch, "🎯", "_steering_tag")
-                        if not _steered:
-                            _dispatch_queue(
-                                self._followup_queue, self._cancelled_followups,
-                                self.followup_dispatch, "📬", "_followup_tag")
+                            stashed_text, stashed_images = self._stashed_input
+                            try:
+                                buf = app.layout.current_buffer
+                                if buf.text.strip():
+                                    # Buffer has content — leave stash intact,
+                                    # user can pop it manually with Ctrl+S.
+                                    _cprint(f"  {_DIM}📌 Stash kept (buffer not empty — Ctrl+S to pop){_RST}")
+                                else:
+                                    self._stashed_input = None
+                                    if stashed_images:
+                                        self._attached_images.extend(stashed_images)
+                                    buf.text = stashed_text
+                                    buf.cursor_position = len(stashed_text)
+                                    _cprint(f"  {_DIM}📌 Stashed input restored{_RST}")
+                            except Exception:
+                                pass
 
                         app.invalidate()  # Refresh status line
 
