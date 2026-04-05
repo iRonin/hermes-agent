@@ -1184,6 +1184,22 @@ class HermesCLI:
         # busy_input_mode: "interrupt" (Enter interrupts current run) or "queue" (Enter queues for next turn)
         _bim = CLI_CONFIG["display"].get("busy_input_mode", "interrupt")
         self.busy_input_mode = "queue" if str(_bim).strip().lower() == "queue" else "interrupt"
+        # Subagent control panel state
+        self._subagent_panel: dict = {}          # task_index -> SubagentRecord
+        self._subagent_panel_open: bool = False
+        self._subagent_panel_cursor: int = 0
+        # Dispatch mode for each queue:
+        #   "one_by_one"  — each queued message triggers its own agent turn (default)
+        #   "all_at_once" — after a turn, all queued messages are joined and sent as one turn
+        _sdm = CLI_CONFIG["display"].get("steering_dispatch", "one_by_one")
+        self.steering_dispatch = "all_at_once" if str(_sdm).strip().lower() == "all_at_once" else "one_by_one"
+        _fdm = CLI_CONFIG["display"].get("followup_dispatch", "one_by_one")
+        self.followup_dispatch = "all_at_once" if str(_fdm).strip().lower() == "all_at_once" else "one_by_one"
+        _sar = CLI_CONFIG.get('display', {}).get('stash_auto_restore', False)
+        self.stash_auto_restore: bool = bool(_sar)
+        self._show_full_user_message: bool = bool(
+            CLI_CONFIG["display"].get("show_full_user_message", False)
+        )
 
         self.verbose = verbose if verbose is not None else (self.tool_progress_mode == "verbose")
         
@@ -8721,22 +8737,26 @@ class HermesCLI:
                         # Auto-restore stashed input after agent finishes,
                         # but only if the buffer is empty — never clobber text
                         # the user started typing while the agent was responding.
-                        if self.stash_auto_restore and self._stash_list:
-                            try:
-                                buf = app.layout.current_buffer
-                                if not buf.text.strip():
-                                    item = self._stash_list.pop(0)
-                                    buf.text = item["text"]
-                                    buf.cursor_position = len(item["text"])
-                                    if item["images"]:
-                                        self._attached_images.extend(item["images"])
-                                    _cprint(f"  {_DIM}📌 Stash item auto-restored{_RST}")
-                                else:
-                                    _cprint(f"  {_DIM}📌 Stash has {len(self._stash_list)} item{'s' if len(self._stash_list) != 1 else ''} — Ctrl+S to browse{_RST}")
-                            except Exception:
-                                pass
-                        elif self._stash_list:
-                            _cprint(f"  {_DIM}📌 Stash has {len(self._stash_list)} item{'s' if len(self._stash_list) != 1 else ''} — Ctrl+S to browse/pop{_RST}")
+                        if self._stashed_input:
+                            if self.stash_auto_restore:
+                                stashed_text, stashed_images = self._stashed_input
+                                try:
+                                    buf = app.layout.current_buffer
+                                    if buf.text.strip():
+                                        # Buffer has content — leave stash intact,
+                                        # user can pop it manually with Ctrl+S.
+                                        _cprint(f"  {_DIM}📌 Stash kept (buffer not empty — Ctrl+S to pop){_RST}")
+                                    else:
+                                        self._stashed_input = None
+                                        if stashed_images:
+                                            self._attached_images.extend(stashed_images)
+                                        buf.text = stashed_text
+                                        buf.cursor_position = len(stashed_text)
+                                        _cprint(f"  {_DIM}📌 Stashed input restored{_RST}")
+                                except Exception:
+                                    pass
+                            else:
+                                _cprint(f"  {_DIM}📌 Stash ready — Ctrl+S to pop{_RST}")
 
                         # Post-turn queue dispatch.
                         # Steering always takes priority — follow-up only runs when steering is empty.
