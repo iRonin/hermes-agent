@@ -1184,6 +1184,9 @@ class HermesCLI:
         # busy_input_mode: "interrupt" (Enter interrupts current run) or "queue" (Enter queues for next turn)
         _bim = CLI_CONFIG["display"].get("busy_input_mode", "interrupt")
         self.busy_input_mode = "queue" if str(_bim).strip().lower() == "queue" else "interrupt"
+        self._show_full_user_message: bool = bool(
+            CLI_CONFIG["display"].get("show_full_user_message", False)
+        )
 
         self.verbose = verbose if verbose is not None else (self.tool_progress_mode == "verbose")
         
@@ -1365,6 +1368,9 @@ class HermesCLI:
         self._agent_running = False
         self._pending_input = queue.Queue()
         self._interrupt_queue = queue.Queue()
+        self._followup_queue: list = []  # entries: {"id": str, "payload": ..., "text": str}
+        self._cancelled_followups: set = set()  # UUIDs recalled via Alt+Up, skipped in process_loop
+        self._followup_recall_count: int = 0   # how many recalls done in this recall session
         self._should_exit = False
         self._last_ctrl_c_time = 0
         self._clarify_state = None
