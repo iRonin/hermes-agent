@@ -472,6 +472,7 @@ class AIAgent:
         args: list[str] | None = None,
         model: str = "",
         max_iterations: int = 90,  # Default tool-calling iterations (shared with subagents)
+        max_api_retries: int = 3,  # Max retries for failed/rate-limited API calls
         tool_delay: float = 1.0,
         enabled_toolsets: List[str] = None,
         disabled_toolsets: List[str] = None,
@@ -560,6 +561,7 @@ class AIAgent:
 
         self.model = model
         self.max_iterations = max_iterations
+        self.max_api_retries = max_api_retries
         # Shared iteration budget — parent creates, children inherit.
         # Consumed by every LLM turn across parent + all subagents.
         self.iteration_budget = iteration_budget or IterationBudget(max_iterations)
@@ -7589,7 +7591,7 @@ class AIAgent:
             
             api_start_time = time.time()
             retry_count = 0
-            max_retries = 3
+            max_retries = self.max_api_retries
             primary_recovery_attempted = False
             max_compression_attempts = 3
             codex_auth_retry_attempted=False
@@ -8748,16 +8750,24 @@ class AIAgent:
 
                     # For rate limits, respect the Retry-After header if present
                     _retry_after = None
-                    if is_rate_limited:
-                        _resp_headers = getattr(getattr(api_error, "response", None), "headers", None)
-                        if _resp_headers and hasattr(_resp_headers, "get"):
-                            _ra_raw = _resp_headers.get("retry-after") or _resp_headers.get("Retry-After")
-                            if _ra_raw:
-                                try:
-                                    _retry_after = min(int(_ra_raw), 120)  # Cap at 2 minutes
-                                except (TypeError, ValueError):
-                                    pass
-                    wait_time = _retry_after if _retry_after else jittered_backoff(retry_count, base_delay=2.0, max_delay=60.0)
+                    _resp_headers = getattr(getattr(api_error, "response", None), "headers", None)
+                    if _resp_headers and hasattr(_resp_headers, "get"):
+                        _ra_raw = _resp_headers.get("retry-after") or _resp_headers.get("Retry-After")
+                        if _ra_raw:
+                            try:
+                                _retry_after = min(int(_ra_raw), 120)  # Cap at 2 minutes
+                            except (TypeError, ValueError):
+                                pass
+                    if _retry_after:
+                        wait_time = _retry_after
+                    elif is_rate_limited:
+                        # Rate limit: longer exponential backoff (5s, 10s, 20s, 40s…) capped at 2 min
+                        import random as _rand
+                        _base = min(5 * (2 ** retry_count), 120)
+                        wait_time = _base + _rand.uniform(0, min(_base * 0.2, 10))  # +jitter
+                    else:
+                        # Other transient errors: shorter backoff (2s, 4s, 8s…) capped at 60s
+                        wait_time = min(2 ** retry_count, 60)
                     if is_rate_limited:
                         self._emit_status(f"⏱️ Rate limit reached. Waiting {wait_time}s before retry (attempt {retry_count + 1}/{max_retries})...")
                     else:
