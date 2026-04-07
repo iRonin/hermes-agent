@@ -39,18 +39,35 @@ Use this skill when the user:
 
 ## Wiki Location
 
-Configured via `skills.config.wiki.path` in `~/.hermes/config.yaml` (prompted
-during `hermes config migrate` or `hermes setup`):
+The wiki path is resolved with this precedence (highest to lowest):
+
+**1. `.hermes.md` frontmatter (per-project):**
+If a `.hermes.md` or `HERMES.md` file exists anywhere from your current
+directory up to the git root, its frontmatter can declare `wiki.path`:
+
+```markdown
+---
+wiki:
+  path: ./wiki
+---
+```
+
+Relative paths are resolved against the directory containing the `.hermes.md`
+file. This allows a separate wiki for each project or subproject.
+
+**2. Global config** (`~/.hermes/config.yaml`):
 
 ```yaml
 skills:
   config:
     wiki:
-      path: ~/wiki
+      path: ~/my-wiki
 ```
 
-Falls back to `~/wiki` default. The resolved path is injected when this
-skill loads — check the `[Skill config: ...]` block above for the active value.
+**3. Default:** `~/wiki`
+
+The resolved path is injected when this skill loads — check the
+`[Skill config: ...]` block above for the active value.
 
 The wiki is just a directory of markdown files — open it in Obsidian, VS Code, or
 any editor. No database, no special tooling required.

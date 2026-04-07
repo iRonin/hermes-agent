@@ -411,6 +411,113 @@ def resolve_skill_config_values(
     return resolved
 
 
+# ── Cwd-aware .hermes.md config resolution ───────────────────────────────
+
+
+def _resolve_cwd_skill_config(cwd: Path) -> Dict[str, Any]:
+    """Walk cwd → root looking for .hermes.md files with frontmatter config.
+
+    Returns a dict mapping logical config keys (e.g. "wiki.path") to their
+    resolved values.  Path values are resolved relative to the .hermes.md
+    file's directory when relative.  Walk stops at the git root.
+    """
+    result: Dict[str, Any] = {}
+
+    # Find git root boundary (or None → walk to filesystem root)
+    stop_at: Optional[Path] = None
+    for candidate in [cwd, *cwd.parents]:
+        if (candidate / ".git").is_dir():
+            stop_at = candidate
+            break
+
+    for directory in [cwd.resolve(), *cwd.resolve().parents]:
+        for name in (".hermes.md", "HERMES.md"):
+            candidate = directory / name
+            if candidate.is_file():
+                try:
+                    raw = candidate.read_text(encoding="utf-8")
+                    frontmatter, _ = parse_frontmatter(raw)
+                    config_vars = extract_skill_config_vars(frontmatter)
+                    for var in config_vars:
+                        key = var["key"]
+                        if key not in result:  # nearest .hermes.md wins
+                            value = var.get("default", "")
+                            base_dir = candidate.parent
+                            if isinstance(value, str) and value:
+                                # Resolve relative paths against the .hermes.md dir
+                                if not value.startswith(("/", "~", "${")):
+                                    resolved = base_dir / value
+                                    if resolved.is_dir():
+                                        value = str(resolved)
+                                    else:
+                                        value = str(resolved)
+                                else:
+                                    value = os.path.expanduser(os.path.expandvars(value))
+                            result[key] = value
+                except Exception:
+                    pass
+
+        if stop_at is not None and directory == stop_at:
+            break
+
+    return result
+
+
+def resolve_skill_config_values(
+    config_vars: List[Dict[str, Any]],
+    cwd: Path | None = None,
+) -> Dict[str, Any]:
+    """Resolve skill config values with cwd-aware .hermes.md override.
+
+    Resolution order (highest priority first):
+    1. Cwd-aware .hermes.md frontmatter (if cwd is provided)
+    2. skills.config.<key> in ~/.hermes/config.yaml
+    3. Declared default in the skill frontmatter
+
+    Backward-compatible: when cwd is None, uses only config.yaml.
+    """
+    # Step 1: Cwd-aware .hermes.md resolution
+    cwd_overrides: Dict[str, Any] = {}
+    if cwd is not None:
+        cwd_overrides = _resolve_cwd_skill_config(cwd.resolve())
+
+    # Step 2: Global config.yaml
+    config_path = get_hermes_home() / "config.yaml"
+    config: Dict[str, Any] = {}
+    if config_path.exists():
+        try:
+            parsed = yaml_load(config_path.read_text(encoding="utf-8"))
+            if isinstance(parsed, dict):
+                config = parsed
+        except Exception:
+            pass
+
+    resolved: Dict[str, Any] = {}
+    for var in config_vars:
+        logical_key = var["key"]
+
+        # Priority 1: .hermes.md cwd override
+        if logical_key in cwd_overrides:
+            resolved[logical_key] = cwd_overrides[logical_key]
+            continue
+
+        # Priority 2: config.yaml
+        storage_key = f"{SKILL_CONFIG_PREFIX}.{logical_key}"
+        value = _resolve_dotpath(config, storage_key)
+
+        # Priority 3: default
+        if value is None or (isinstance(value, str) and not value.strip()):
+            value = var.get("default", "")
+
+        # Expand ~ in path-like values
+        if isinstance(value, str) and ("~" in value or "${" in value):
+            value = os.path.expanduser(os.path.expandvars(value))
+
+        resolved[logical_key] = value
+
+    return resolved
+
+
 # ── Description extraction ────────────────────────────────────────────────
 
 

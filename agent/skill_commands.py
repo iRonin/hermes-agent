@@ -101,7 +101,12 @@ def _inject_skill_config(loaded_skill: dict[str, Any], parts: list[str]) -> None
         if not config_vars:
             return
 
-        resolved = resolve_skill_config_values(config_vars)
+        # Determine cwd: use TERMINAL_CWD (gateway mode) or os.getcwd() (CLI)
+        _cwd = os.getenv("TERMINAL_CWD")
+        if not _cwd:
+            _cwd = os.getcwd()
+        
+        resolved = resolve_skill_config_values(config_vars, cwd=Path(_cwd))
         if not resolved:
             return
 
