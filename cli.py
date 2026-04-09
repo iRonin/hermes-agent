@@ -1385,6 +1385,7 @@ class HermesCLI:
         self._last_ctrl_c_time = 0
         self._followup_queue: list = []
         self._steering_queue: list = []
+        self._cancelled_steerings: set = set()
         self._stash_list: list = []   # multi-item stash [{id, text, images, stashed_at, preview}]
         self._stash_panel_open: bool = False
         self._stash_panel_cursor: int = 0
@@ -7476,10 +7477,14 @@ class HermesCLI:
                 payload = (text, images) if images else text
                 if self._agent_running and not (text and _looks_like_slash_command(text)):
                     if self.busy_input_mode == "queue":
-                        # Queue for the next turn instead of interrupting
-                        self._pending_input.put(payload)
-                        preview = text if text else f"[{len(images)} image{'s' if len(images) != 1 else ''} attached]"
-                        _cprint(f"  Queued for the next turn: {preview[:80]}{'...' if len(preview) > 80 else ''}")
+                        # Queue for steering instead of interrupting
+                        import uuid as _uuid_mod
+                        _stag = _uuid_mod.uuid4().hex
+                        _steer_text = text if text else f"[{len(images)} image{'s' if len(images) != 1 else ''} attached]"
+                        self._steering_queue.append({
+                            "id": _stag, "payload": payload, "text": _steer_text
+                        })
+                        _cprint(f"  🎯 Steer queued ({len(self._steering_queue)}): {_steer_text[:60]}")
                     else:
                         self._interrupt_queue.put(payload)
                         # Debug: log to file when message enters interrupt queue
@@ -8943,6 +8948,22 @@ class HermesCLI:
                                 pass
 
                         app.invalidate()  # Refresh status line
+
+                        # Dispatch steering queue after agent finishes
+                        if self._steering_queue:
+                            if self.steering_dispatch == "all_at_once":
+                                # Join all steering items into one message
+                                steer_items = [it.get("text", "") for it in self._steering_queue if isinstance(it, dict)]
+                                combined = " ".join(steer_items)
+                                self._steering_queue.clear()
+                                _cprint(f"  {_DIM}🎯 {len(steer_items)} steering item{'s' if len(steer_items) != 1 else ''} dispatched (all-at-once){_RST}")
+                                self._pending_input.put(combined)
+                            else:
+                                # Dispatch first steering item one-by-one
+                                item = self._steering_queue.pop(0)
+                                payload = item.get("payload", item.get("text", "")) if isinstance(item, dict) else item
+                                _cprint(f"  {_DIM}🎯 Steering dispatched: {str(payload)[:60]}{_RST}")
+                                self._pending_input.put(payload)
 
                         # Continuous voice: auto-restart recording after agent responds.
                         # Dispatch to a daemon thread so play_beep (sd.wait) and
