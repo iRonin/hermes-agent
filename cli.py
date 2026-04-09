@@ -1383,6 +1383,8 @@ class HermesCLI:
         self._interrupt_queue = queue.Queue()
         self._should_exit = False
         self._last_ctrl_c_time = 0
+        self._followup_queue: list = []
+        self._steering_queue: list = []
         self._stash_list: list = []   # multi-item stash [{id, text, images, stashed_at, preview}]
         self._stash_panel_open: bool = False
         self._stash_panel_cursor: int = 0
@@ -8681,7 +8683,7 @@ class HermesCLI:
             pass
 
         layout = Layout(HSplit(_layout_children))
-        
+
         # Style for the application
         self._tui_style_base = {
             'input-area': '#FFF8DC',
