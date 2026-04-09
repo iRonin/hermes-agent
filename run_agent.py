@@ -6507,13 +6507,24 @@ class AIAgent:
             self._touch_activity(f"tool completed: {function_name} ({tool_duration:.1f}s)")
 
             # Render any images found in tool result inline (iTerm2/Kitty/chafa)
-            # Bypass _print_fn because prompt_toolkit's StdoutProxy mangles
-            # terminal image protocol escape sequences.
+            # DEBUG: log what we're seeing
+            import logging
+            if function_name == "browser_vision" or "screenshot" in function_name.lower():
+                try:
+                    logging.warning(f"DEBUG IMAGE: tool={function_name}, result_type={type(function_result).__name__}, result_len={len(str(function_result))}")
+                    logging.warning(f"DEBUG IMAGE: result_preview={str(function_result)[:300]}")
+                except:
+                    pass
             try:
                 _img_output = _render_images_in_result(function_result)
                 if _img_output:
+                    logging.warning(f"DEBUG IMAGE: RENDERED, len={len(_img_output)}")
                     _write_image_to_tty(_img_output)
-            except Exception:
+                else:
+                    if function_name == "browser_vision" or "screenshot" in function_name.lower():
+                        logging.warning("DEBUG IMAGE: NO OUTPUT FROM render_images_in_result")
+            except Exception as _img_err:
+                logging.warning(f"DEBUG IMAGE: EXCEPTION: {_img_err}")
                 pass  # Never let image rendering break tool execution
 
             if self.verbose_logging:

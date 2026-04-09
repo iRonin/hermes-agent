@@ -1120,24 +1120,19 @@ def _detect_image_paths(text: str) -> list[str]:
 
 
 def _write_image_to_tty(image_output: str) -> None:
-    """Write image escape sequences directly to the TTY.
-    Bypasses patch_stdout's StdoutProxy which mangles escape sequences.
+    """Write image escape sequences directly to file descriptor 1 (stdout).
+    
+    This bypasses Python's sys.stdout and prompt_toolkit's StdoutProxy,
+    writing raw bytes directly to the raw fd. os.write(1, ...) works
+    even inside patch_stdout contexts because it bypasses all Python I/O.
+    
+    NOTE: /dev/tty and os.ctermid() both fail with "Device not configured"
+    when running inside subprocess/tool contexts, so we must use raw fd 1.
     """
     if isinstance(image_output, str):
         image_output = image_output.encode("utf-8")
-    # Try /dev/tty first (works under prompt_toolkit context)
     try:
-        fd = os.open("/dev/tty", os.O_WRONLY)
-        os.write(fd, image_output + b"\n")
-        os.close(fd)
-        return
-    except OSError:
-        pass
-    # Fallback: os.ctermid()
-    try:
-        fd = os.open(os.ctermid(), os.O_WRONLY | os.O_NOCTTY)
-        os.write(fd, image_output + b"\n")
-        os.close(fd)
+        os.write(1, image_output + b"\n")
     except OSError:
         pass
 
