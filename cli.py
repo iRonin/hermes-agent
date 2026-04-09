@@ -8611,24 +8611,21 @@ class HermesCLI:
         # the corresponding interactive prompt is active.
         completions_menu = CompletionsMenu(max_height=12, scroll_offset=1)
 
-        layout = Layout(
-            HSplit(
-                self._build_tui_layout_children(
-                    sudo_widget=sudo_widget,
-                    secret_widget=secret_widget,
-                    approval_widget=approval_widget,
-                    clarify_widget=clarify_widget,
-                    spinner_widget=spinner_widget,
-                    spacer=spacer,
-                    status_bar=status_bar,
-                    input_rule_top=input_rule_top,
-                    image_bar=image_bar,
-                    input_area=input_area,
-                    input_rule_bot=input_rule_bot,
-                    voice_status_bar=voice_status_bar,
-                    completions_menu=completions_menu,
-                )
-            )
+        # Build the base layout list so subagent/stash panels can inject widgets.
+        _layout_children = self._build_tui_layout_children(
+            sudo_widget=sudo_widget,
+            secret_widget=secret_widget,
+            approval_widget=approval_widget,
+            clarify_widget=clarify_widget,
+            spinner_widget=spinner_widget,
+            spacer=spacer,
+            status_bar=status_bar,
+            input_rule_top=input_rule_top,
+            image_bar=image_bar,
+            input_area=input_area,
+            input_rule_bot=input_rule_bot,
+            voice_status_bar=voice_status_bar,
+            completions_menu=completions_menu,
         )
         # Inject the subagent panel widget just before the status bar.
         # Done here (not via _get_extra_tui_widgets) so the extension hook
