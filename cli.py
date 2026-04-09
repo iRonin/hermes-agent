@@ -4959,7 +4959,8 @@ class HermesCLI:
                 self._app.invalidate()
             return
 
-        if sub in ("settings", "toggle"):
+        # Allow partial matches for settings (sett, set, settin, tog, etc.)
+        if sub.startswith("sett") or sub.startswith("tog"):
             self.stash_auto_restore = not self.stash_auto_restore
             state = "ON" if self.stash_auto_restore else "OFF"
             _cprint(f"  📌 Auto-restore: {state}")
@@ -4972,7 +4973,7 @@ class HermesCLI:
                 self._app.invalidate()
             return
 
-        if sub == "auto-restore":
+        if sub.startswith("auto"):
             current = "ON" if self.stash_auto_restore else "OFF"
             _cprint(f"  📌 Auto-restore: {current}")
             return
