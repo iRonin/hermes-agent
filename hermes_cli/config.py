@@ -598,6 +598,13 @@ DEFAULT_CONFIG = {
     # a plugin in plugins/context_engine/<name>/ or ~/.hermes/plugins/.
     "context": {
         "engine": "compressor",
+        # Compose all found context files instead of first-match-wins.
+        "compose": True,
+        # How far to walk up parent directories:
+        #   "git_root" | "home" | "unlimited" | absolute path
+        "walk_limit": "home",
+        # Print discovered context files at startup.
+        "show_loaded": True,
     },
 
     # Persistent memory -- bounded curated memory injected into system prompt
