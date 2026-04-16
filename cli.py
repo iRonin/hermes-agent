@@ -5572,6 +5572,84 @@ class HermesCLI:
         else:
             _cprint("  No context files found.")
 
+    def _handle_stash_command(self, cmd: str):
+        """Handle /stash — multi-item stash management.
+
+        Subcommands:
+            /stash              — list stash items
+            /stash push <text>  — push text to stash
+            /stash pop [N]      — pop item N (default 0) from stash
+            /stash clear        — clear all stash items
+            /stash settings     — show stash settings
+        """
+        sub = cmd.strip().split(maxsplit=1)
+        action = sub[1].lower() if len(sub) > 1 else "list"
+
+        if action == "list":
+            if not self._stash_list:
+                _cprint("  📌 Stash is empty")
+                return
+            _cprint(f"  📌 Stash ({len(self._stash_list)} items):")
+            for i, item in enumerate(self._stash_list):
+                age = self._fmt_stash_age(item["stashed_at"])
+                preview = item.get("preview", "")[:50]
+                img_tag = f" +{len(item.get('images', []))}🖼" if item.get("images") else ""
+                _cprint(f"    [{i}] {age} — {preview}{img_tag}")
+            _cprint("  /stash pop <N> to restore, /stash clear to empty")
+
+        elif action.startswith("push"):
+            parts = cmd.strip().split(maxsplit=2)
+            text = parts[2] if len(parts) > 2 else ""
+            if not text.strip():
+                _cprint("  Usage: /stash push <text>")
+                return
+            import uuid, time
+            preview = text[:60] + ("..." if len(text) > 60 else "")
+            self._stash_list.insert(0, {
+                "id": uuid.uuid4().hex,
+                "text": text,
+                "images": [],
+                "stashed_at": time.monotonic(),
+                "preview": preview,
+            })
+            _cprint(f"  📌 Stashed #{len(self._stash_list)}")
+
+        elif action.startswith("pop"):
+            parts = cmd.strip().split()
+            idx = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+            if not self._stash_list:
+                _cprint("  📌 Stash is empty")
+                return
+            if idx < 0 or idx >= len(self._stash_list):
+                _cprint(f"  📌 Invalid index: {idx} (0–{len(self._stash_list)-1})")
+                return
+            item = self._stash_list.pop(idx)
+            buf = self._app.current_buffer if self._app else None
+            if buf:
+                buf.text = item["text"]
+                buf.cursor_position = len(item["text"])
+            if item.get("images"):
+                self._attached_images.extend(item["images"])
+            _cprint(f"  📌 Restored stash item #{idx}")
+            self._app.invalidate() if self._app else None
+
+        elif action == "clear":
+            count = len(self._stash_list)
+            self._stash_list.clear()
+            self._stash_panel_open = False
+            self._stash_panel_cursor = 0
+            _cprint(f"  📌 Cleared {count} stash item(s)")
+
+        elif action in ("settings", "toggle"):
+            _sar = CLI_CONFIG.get("display", {}).get("stash_auto_restore", False)
+            _cprint(f"  📌 Stash settings:")
+            _cprint(f"    Auto-restore: {'ON' if _sar else 'OFF'}")
+            _cprint(f"    Items: {len(self._stash_list)}")
+
+        else:
+            _cprint(f"  Unknown stash subcommand: {action}")
+            _cprint("  Usage: /stash [list|push <text>|pop [N]|clear|settings]")
+
     def _toggle_yolo(self):
         """Toggle YOLO mode — skip all dangerous command approval prompts."""
         import os
@@ -8115,36 +8193,100 @@ class HermesCLI:
 
         @kb.add('c-s')
         def handle_stash(event):
-            """Ctrl+S: stash current input (text + images) or pop stash.
+            """Ctrl+S: multi-item stash with browsable panel.
 
-            When the input area has text or attached images, stash them and
-            clear the input so the user can type a different message.  If the
-            input is empty *and* there's a stash, restore it immediately.
-            The stash is also auto-restored after the agent finishes responding
-            (see process_loop).
+            - Input has text or images → push to stash list
+            - Input empty + stash has 1 item → pop immediately
+            - Input empty + stash has multiple items → open browser panel
+            - Input empty + stash empty + panel open → close panel
+            - Input empty + stash empty → print notice
             """
+            import uuid as _uuid_mod, time as _time_mod
             buf = event.app.current_buffer
-            text = buf.text
+            text = buf.text.strip()
             has_images = bool(cli_ref._attached_images)
 
+            if cli_ref._stash_panel_open:
+                # Ctrl+S closes the panel
+                cli_ref._stash_panel_open = False
+                event.app.invalidate()
+                return
+
             if text or has_images:
-                # --- Stash current input ---
-                images_snapshot = list(cli_ref._attached_images)
-                cli_ref._stashed_input = (text, images_snapshot)
+                # Push to stash
+                images = list(cli_ref._attached_images)
                 cli_ref._attached_images.clear()
+                preview = text[:60] + ("..." if len(text) > 60 else "")
+                cli_ref._stash_list.insert(0, {
+                    "id": _uuid_mod.uuid4().hex,
+                    "text": buf.text,
+                    "images": images,
+                    "stashed_at": _time_mod.monotonic(),
+                    "preview": preview or f"[{len(images)} image{'s' if len(images) != 1 else ''}]",
+                })
                 buf.reset()
-                _cprint(f"  {_DIM}📌 Input stashed (Ctrl+S to pop; auto-restores if buffer empty after response){_RST}")
-                event.app.invalidate()
-            elif cli_ref._stashed_input:
-                # --- Pop stash into input ---
-                stashed_text, stashed_images = cli_ref._stashed_input
-                cli_ref._stashed_input = None
-                if stashed_images:
-                    cli_ref._attached_images.extend(stashed_images)
-                buf.text = stashed_text
-                buf.cursor_position = len(stashed_text)
-                _cprint(f"  {_DIM}📌 Stash restored{_RST}")
-                event.app.invalidate()
+                _cprint(f"  {_DIM}📌 Stashed #{len(cli_ref._stash_list)} (Ctrl+S to browse/pop){_RST}")
+            elif cli_ref._stash_list:
+                if len(cli_ref._stash_list) == 1:
+                    # Single item — pop immediately
+                    item = cli_ref._stash_list.pop(0)
+                    buf.text = item["text"]
+                    buf.cursor_position = len(item["text"])
+                    if item["images"]:
+                        cli_ref._attached_images.extend(item["images"])
+                    _cprint(f"  {_DIM}📌 Stash popped{_RST}")
+                else:
+                    # Multiple items — open browser
+                    cli_ref._stash_panel_open = True
+                    cli_ref._stash_panel_cursor = 0
+            else:
+                _cprint(f"  {_DIM}📌 Stash is empty{_RST}")
+            event.app.invalidate()
+
+        # Stash panel navigation keybindings (only active when panel is open)
+        _stash_panel_active = Condition(lambda: cli_ref._stash_panel_open and bool(cli_ref._stash_list))
+
+        @kb.add('up', filter=_stash_panel_active, eager=True)
+        def stash_panel_up(event):
+            cli_ref._stash_panel_cursor = max(0, cli_ref._stash_panel_cursor - 1)
+            event.app.invalidate()
+
+        @kb.add('down', filter=_stash_panel_active, eager=True)
+        def stash_panel_down(event):
+            cli_ref._stash_panel_cursor = min(len(cli_ref._stash_list) - 1, cli_ref._stash_panel_cursor + 1)
+            event.app.invalidate()
+
+        @kb.add('enter', filter=_stash_panel_active, eager=True)
+        def stash_panel_enter(event):
+            if cli_ref._stash_list:
+                item = cli_ref._stash_list.pop(cli_ref._stash_panel_cursor)
+                buf = event.app.current_buffer
+                buf.text = item["text"]
+                buf.cursor_position = len(item["text"])
+                if item["images"]:
+                    cli_ref._attached_images.extend(item["images"])
+                cli_ref._stash_panel_open = False
+                cli_ref._stash_panel_cursor = min(
+                    cli_ref._stash_panel_cursor, max(0, len(cli_ref._stash_list) - 1)
+                )
+                _cprint(f"  {_DIM}📌 Stash item restored{_RST}")
+            event.app.invalidate()
+
+        @kb.add('d', filter=_stash_panel_active)
+        def stash_panel_delete(event):
+            if cli_ref._stash_list:
+                cli_ref._stash_list.pop(cli_ref._stash_panel_cursor)
+                cli_ref._stash_panel_cursor = min(
+                    cli_ref._stash_panel_cursor, max(0, len(cli_ref._stash_list) - 1)
+                )
+                if not cli_ref._stash_list:
+                    cli_ref._stash_panel_open = False
+            event.app.invalidate()
+
+        @kb.add('escape', filter=_stash_panel_active)
+        def stash_panel_esc(event):
+            cli_ref._stash_panel_open = False
+            event.app.invalidate()
 
         @kb.add('c-p')
         def handle_peek_or_history(event):
