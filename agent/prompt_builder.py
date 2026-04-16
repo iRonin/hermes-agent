@@ -1227,6 +1227,7 @@ def build_context_files_prompt(
     skip_soul: bool = False,
     compose: bool = True,
     walk_limit: str = "home",
+    agents_priority: bool = True,
 ) -> str:
     """Discover and load context files for the system prompt.
 
@@ -1236,6 +1237,9 @@ def build_context_files_prompt(
 
     When *compose* is False, legacy first-match-wins behavior: only the
     highest-priority single context file is loaded.
+
+    When *agents_priority* is True (default), AGENTS.md files are preferred
+    over CLAUDE.md files at the same directory level.
 
     Priority order within compose mode (all found are included):
       1. .hermes.md / HERMES.md  (walk to walk_limit)
@@ -1307,10 +1311,15 @@ def build_context_files_prompt(
                         logger.debug("Could not read %s: %s", candidate, e)
 
         # CLAUDE.md files — collect all across hierarchy
+        # When agents_priority is True, skip CLAUDE.md at levels where
+        # AGENTS.md exists (AGENTS.md takes priority at that level).
         for d in parent_dirs:
             for name in ["CLAUDE.md", "claude.md"]:
                 candidate = d / name
                 if candidate.is_file():
+                    # Check if AGENTS.md exists at this same level
+                    if agents_priority and any((d / a).is_file() for a in ["AGENTS.md", "agents.md"]):
+                        continue
                     try:
                         content = candidate.read_text(encoding="utf-8").strip()
                         if not content:
