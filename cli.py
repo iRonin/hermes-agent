@@ -206,6 +206,7 @@ def load_cli_config() -> Dict[str, Any]:
             "show_reasoning": False,
             "streaming": True,
             "busy_input_mode": "interrupt",
+            "ctrl_d_never_exit": False,  # Ctrl+D deletes char under cursor but never exits hermes
             "terminal_title": True,   # Set tab/window title via OSC sequences (disable for tmux/screen or if job name is appended by your terminal profile)
             "show_full_user_message": False,  # When true, show all lines instead of first + (+N lines)
             "image_preview": True,   # Render images inline in terminal when tools produce them (iTerm2/Kitty/chafa)
@@ -3089,7 +3090,7 @@ class HermesCLI:
             ]),
             ("Session", [
                 ("Ctrl+C",          "Cancel prompt / interrupt agent / exit"),
-                ("Ctrl+D",          "Delete char under cursor (exit when input empty)"),
+                ("Ctrl+D",          "Delete char under cursor (exit when input empty, unless ctrl_d_never_exit)"),
                 ("Ctrl+Z",          "Suspend to background (fg to resume)"),
             ]),
             ("Drafting", [
@@ -3097,7 +3098,7 @@ class HermesCLI:
                 ("Ctrl+S",          "Stash input (pop with Ctrl+S; auto-restores after response if buffer empty)"),
                 ("Ctrl+P",          "Peek paste / preview input / full history pager (empty input)"),
                 ("Ctrl+V",          "Paste from clipboard (image-aware)"),
-                ("ESC ESC",         "Clear input buffer and attached images"),
+                ("ESC ESC",         "Clear input buffer (or open history pager when empty)"),
             ]),
             ("Subagents", [
                 ("Ctrl+X",          "Toggle subagent panel (↑↓ navigate, K interrupt)"),
@@ -7556,17 +7557,21 @@ class HermesCLI:
 
         @kb.add('escape', 'escape')
         def handle_double_escape(event):
-            """Double ESC: clear the input buffer.
+            """Double ESC: clear the input buffer, or open history pager when empty.
 
-            Press ESC twice quickly to discard the current draft.
-            Single ESC is the prefix for Alt key sequences (escape, enter etc.)
-            so the double-press avoids conflicting with those.
+            - If input has text or images: clears the buffer (discard draft).
+            - If input is empty: opens the history pager (same as Ctrl+P).
+              Single ESC is the prefix for Alt key sequences, so double-press
+              avoids conflicting with those.
             """
             buf = event.app.current_buffer
             if buf.text or cli_ref._attached_images:
                 buf.reset()
                 cli_ref._attached_images.clear()
                 event.app.invalidate()
+            else:
+                # Empty buffer — open history pager (default action)
+                cli_ref.show_history_full()
 
         @kb.add('c-j')
         def handle_ctrl_enter(event):
@@ -7821,12 +7826,15 @@ class HermesCLI:
         @kb.add('c-d')
         def handle_ctrl_d(event):
             """Ctrl+D: delete char under cursor (standard readline behaviour).
-            Only exit when the input is empty — same as bash/zsh.
+            Only exits when the input is empty — same as bash/zsh.
+            If display.ctrl_d_never_exit is True, never exits hermes.
             """
             buf = event.app.current_buffer
             if buf.text:
                 buf.delete()
             else:
+                if CLI_CONFIG["display"].get("ctrl_d_never_exit", False):
+                    return  # Never exit, just ignore Ctrl+D on empty input
                 self._should_exit = True
                 event.app.exit()
 
