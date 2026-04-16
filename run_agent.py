@@ -1386,6 +1386,7 @@ class AIAgent:
                 api_mode=self.api_mode,
             )
         self.compression_enabled = compression_enabled
+        self._compressing = False  # True while compression is in-flight
 
         # Reject models whose context window is below the minimum required
         # for reliable tool-calling workflows (64K tokens).
@@ -6768,6 +6769,17 @@ class AIAgent:
             if messages and messages[-1].get("_flush_sentinel") == _sentinel:
                 messages.pop()
 
+    def _compressor_info(self) -> str:
+        """Return a human-readable string describing the active compressor."""
+        cc = self.context_compressor
+        name = getattr(cc, "name", "compressor")
+        # Smart compressor (IroninCompressor) extra settings
+        keep = getattr(cc, "_keep_threshold", None)
+        drop = getattr(cc, "_drop_threshold", None)
+        if keep is not None and drop is not None:
+            return f"{name} (keep≥{keep}, drop<{drop})"
+        return name
+
     def _compress_context(self, messages: list, system_message: str, *, approx_tokens: int = None, task_id: str = "default", focus_topic: str = None) -> tuple:
         """Compress conversation context and split the session in SQLite.
 
@@ -8363,7 +8375,7 @@ class AIAgent:
             
             api_start_time = time.time()
             retry_count = 0
-            max_retries = 3
+            max_retries = getattr(self, "max_api_retries", 3)
             primary_recovery_attempted = False
             max_compression_attempts = 3
             codex_auth_retry_attempted=False
@@ -10221,12 +10233,17 @@ class AIAgent:
                                 }
 
                     if self.compression_enabled and _compressor.should_compress(_real_tokens):
-                        self._safe_print("  ⟳ compacting context…")
-                        messages, active_system_prompt = self._compress_context(
-                            messages, system_message,
-                            approx_tokens=self.context_compressor.last_prompt_tokens,
-                            task_id=effective_task_id,
-                        )
+                        _comp_info = self._compressor_info()
+                        self._safe_print(f"  🗜️  {_comp_info} — compacting {len(messages)} messages (~{_real_tokens:,} tokens)...")
+                        self._compressing = True
+                        try:
+                            messages, active_system_prompt = self._compress_context(
+                                messages, system_message,
+                                approx_tokens=self.context_compressor.last_prompt_tokens,
+                                task_id=effective_task_id,
+                            )
+                        finally:
+                            self._compressing = False
                         # Compression created a new session — clear history so
                         # _flush_messages_to_session_db writes compressed messages
                         # to the new session (see preflight compression comment).
