@@ -227,6 +227,14 @@ def _discover_tools():
 
 _discover_tools()
 
+# Custom tools override directory (~/.hermes/custom_tools/)
+# Loaded AFTER built-ins so custom implementations can replace them.
+try:
+    from tools.custom_tools_loader import discover_and_load_custom_tools
+    discover_and_load_custom_tools()
+except Exception as e:
+    logger.debug("Custom tools discovery failed: %s", e)
+
 # MCP tool discovery (external MCP servers from config)
 try:
     from tools.mcp_tool import discover_mcp_tools

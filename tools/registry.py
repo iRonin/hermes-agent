@@ -185,8 +185,14 @@ class ToolRegistry:
         description: str = "",
         emoji: str = "",
         max_result_size_chars: int | float | None = None,
+        override: bool = False,
     ):
-        """Register a tool.  Called at module-import time by each tool file."""
+        """Register a tool.  Called at module-import time by each tool file.
+
+        If *override* is True, this registration is allowed to replace an
+        existing tool even if the toolsets differ (used by custom tools
+        override directory to replace built-in implementations).
+        """
         with self._lock:
             existing = self._tools.get(name)
             if existing and existing.toolset != toolset:
@@ -199,6 +205,13 @@ class ToolRegistry:
                 if both_mcp:
                     logger.debug(
                         "Tool '%s': MCP toolset '%s' overwriting MCP toolset '%s'",
+                        name, toolset, existing.toolset,
+                    )
+                elif override:
+                    # Custom tools override directory is allowed to replace
+                    # built-in tools with user-provided implementations.
+                    logger.info(
+                        "Custom tool '%s' (toolset '%s') overriding built-in (toolset '%s')",
                         name, toolset, existing.toolset,
                     )
                 else:
