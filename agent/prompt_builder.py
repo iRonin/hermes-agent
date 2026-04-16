@@ -1116,6 +1116,22 @@ def discover_context_files(
         cwd = os.getcwd()
     cwd_path = Path(cwd).resolve()
     found: list[str] = []
+    seen_lower: set = set()  # Track lowercase paths to dedup on case-insensitive FS (macOS)
+
+    def _add_if_file(candidate: Path) -> bool:
+        """Add a file if it exists and hasn't been seen yet (dedups case variants on macOS)."""
+        if not candidate.is_file():
+            return False
+        # Use lowercase string for dedup — macOS HFS+/APFS is case-insensitive
+        key = str(candidate.resolve()).lower()
+        if key in seen_lower:
+            return False
+        seen_lower.add(key)
+        try:
+            found.append(str(candidate.relative_to(cwd_path)))
+        except ValueError:
+            found.append(str(candidate))
+        return True
 
     if compose:
         # Collect all files by type across the walk hierarchy
@@ -1124,41 +1140,24 @@ def discover_context_files(
         # .hermes.md files
         for d in parent_dirs:
             for name in _HERMES_MD_NAMES:
-                candidate = d / name
-                if candidate.is_file():
-                    try:
-                        found.append(str(candidate.relative_to(cwd_path)))
-                    except ValueError:
-                        found.append(str(candidate))
+                _add_if_file(d / name)
 
         # AGENTS.md files
         for d in parent_dirs:
             for name in ["AGENTS.md", "agents.md"]:
-                candidate = d / name
-                if candidate.is_file():
-                    try:
-                        found.append(str(candidate.relative_to(cwd_path)))
-                    except ValueError:
-                        found.append(str(candidate))
+                _add_if_file(d / name)
 
         # CLAUDE.md files
         for d in parent_dirs:
             for name in ["CLAUDE.md", "claude.md"]:
-                candidate = d / name
-                if candidate.is_file():
-                    try:
-                        found.append(str(candidate.relative_to(cwd_path)))
-                    except ValueError:
-                        found.append(str(candidate))
+                _add_if_file(d / name)
 
         # .cursorrules and .cursor/rules/*.mdc
-        cursorrules = cwd_path / ".cursorrules"
-        if cursorrules.is_file():
-            found.append(".cursorrules")
+        _add_if_file(cwd_path / ".cursorrules")
         cursor_rules_dir = cwd_path / ".cursor" / "rules"
         if cursor_rules_dir.is_dir():
             for mdc in sorted(cursor_rules_dir.glob("*.mdc")):
-                found.append(f".cursor/rules/{mdc.name}")
+                _add_if_file(mdc)
     else:
         # First-match-wins legacy behavior
         hermes_md = _find_hermes_md(cwd_path)
